@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3DS Files Fetcher</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+:root{--bg:#fff;--fg:#1c1b1a;--mut:#6b6762;--card:#f5f3ef;--bd:#ddd8d0;--ac:#c4623d;--ok:#2e7d4f;--err:#b3341f}
+@media(prefers-color-scheme:dark){:root{--bg:#1c1b1a;--fg:#ece8e1;--mut:#9a948b;--card:#262523;--bd:#3a3835;--ac:#e0825c;--ok:#5fbf86;--err:#ff7a63}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+main{max-width:660px;margin:0 auto;padding:32px 20px}
+h1{font-size:1.5rem;margin:0 0 4px}
+h2{font-size:1rem;margin:22px 0 8px}
+p.sub,.note{color:var(--mut)}
+.note{font-size:.9rem}
+.item,.box{display:flex;gap:12px;align-items:flex-start;background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+.item input{margin-top:5px;accent-color:var(--ac)}
+.item b{display:block}.item small{color:var(--mut)}
+.st{margin-left:auto;font-size:.85rem;text-align:right;max-width:55%;word-break:break-word}
+.ok{color:var(--ok)}.err{color:var(--err)}
+button{background:var(--ac);color:#fff;border:0;border-radius:10px;padding:11px 18px;font:inherit;font-weight:600;cursor:pointer}
+button.alt{background:transparent;color:var(--ac);border:1px solid var(--ac)}
+button:disabled{opacity:.5;cursor:not-allowed}
+a{color:var(--ac)}
+#bar{height:8px;border-radius:4px;background:var(--bd);overflow:hidden;margin-top:14px}
+#bar i{display:block;height:100%;width:0;background:var(--ac);transition:width .2s}
+</style>
+</head>
+<body>
+<main>
+<h1>3DS Files Fetcher</h1>
+<p class="sub">Grabs the latest releases from GitHub and puts them on your SD card, or into a zip.</p>
+
+<h2>1. SD card (optional)</h2>
+<div class="box">
+  <button class="alt" id="pick">Choose SD card folder…</button>
+  <span id="picked" class="note" style="align-self:center">Nothing chosen: you'll get a zip instead.</span>
+</div>
+<p class="note">Browsers can't list drive letters, so you pick the SD card's folder yourself (works in Chrome/Edge). If the browser refuses the drive root, skip this step and use the zip.</p>
+
+<h2>2. What to download</h2>
+<div id="list"></div>
+
+<h2>3. Go</h2>
+<button id="go">Download latest</button>
+<div id="bar"><i></i></div>
+<p class="note">Back up your SD card first. Only SD files are touched, never the console's internal memory. Open this file in Chrome or Edge from your computer, not inside a chat preview.</p>
+</main>
+<script>
+const ITEMS=[
+ {id:'luma',name:'Luma3DS',repo:'LumaTeam/Luma3DS',type:'luma',on:true,d:'boot.firm + boot.3dsx to the SD root'},
+ {id:'gm9',name:'GodMode9',repo:'d0k3/GodMode9',type:'gm9',on:true,d:'GodMode9.firm to /luma/payloads, plus /gm9'},
+ {id:'uu',name:'Universal-Updater',repo:'Universal-Team/Universal-Updater',type:'app',on:true,d:'.3dsx to /3ds, .cia to /cias'},
+ {id:'fbi',name:'FBI',repo:'Steveice10/FBI',type:'app',on:false,d:'.3dsx to /3ds, .cia to /cias'},
+ {id:'cp',name:'Checkpoint',repo:'FlagBrew/Checkpoint',type:'app',on:false,d:'.3dsx to /3ds, .cia to /cias'}
+];
+const $=id=>document.getElementById(id);
+let dirHandle=null;
+$('list').innerHTML=ITEMS.map(i=>`<label class="item"><input type="checkbox" id="${i.id}" ${i.on?'checked':''}><span><b>${i.name}</b><small>${i.d}</small></span><span class="st" id="st-${i.id}"></span></label>`).join('');
+const status=(i,m,c)=>{$('st-'+i.id).className='st '+(c||'');$('st-'+i.id).innerHTML=m};
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+if(!window.showDirectoryPicker){$('pick').disabled=true;$('picked').textContent='This browser can\'t write to folders: you\'ll get a zip. Use Chrome or Edge for direct writing.'}
+$('pick').onclick=async()=>{
+  try{
+    dirHandle=await showDirectoryPicker({mode:'readwrite'});
+    $('picked').textContent='Selected: '+dirHandle.name;
+  }catch(e){
+    dirHandle=null;
+    $('picked').textContent=e.name==='AbortError'?'Nothing chosen: you\'ll get a zip instead.':'Browser refused that folder ('+e.message+'). Use the zip instead.';
+  }
+};
+
+async function fetchStep(stage,url,opt){
+  let r;
+  try{r=await fetch(url,opt)}catch(e){throw new Error(`${stage}: blocked or offline (${e.message})`)}
+  if(!r.ok)throw new Error(`${stage}: HTTP ${r.status}${r.status===403?' (GitHub rate limit, retry later)':''}`);
+  return r;
+}
+async function download(a){
+  const tries=[()=>fetchStep('download',a.url,{headers:{Accept:'application/octet-stream'}}),
+               ()=>fetchStep('download (alt)',a.browser_download_url)];
+  let last;
+  for(const t of tries){try{return await (await t()).arrayBuffer()}catch(e){last=e}}
+  throw last;
+}
+async function writeTo(root,path,data){
+  const parts=path.split('/');let d=root;
+  for(const p of parts.slice(0,-1))d=await d.getDirectoryHandle(p,{create:true});
+  const w=await (await d.getFileHandle(parts[parts.length-1],{create:true})).createWritable();
+  await w.write(data);await w.close();
+}
+
+$('go').onclick=async()=>{
+  const btn=$('go'),chosen=ITEMS.filter(i=>$(i.id).checked);
+  if(!chosen.length)return;
+  if(dirHandle&&!confirm(`Write files into "${dirHandle.name}"? Files with the same names will be overwritten.`))return;
+  btn.disabled=true;$('bar').firstChild.style.width='0';
+  const out=new JSZip(),ver=[];let n=0;
+  for(const it of chosen){
+    try{
+      status(it,'fetching…');
+      const rel=await (await fetchStep('release lookup',`https://api.github.com/repos/${it.repo}/releases/latest`,{headers:{Accept:'application/vnd.github+json'}})).json();
+      const tag=rel.tag_name;
+      if(it.type==='app'){
+        const as=rel.assets.filter(a=>/\.(3dsx|cia)$/i.test(a.name));
+        if(!as.length)throw new Error('no .3dsx/.cia in release');
+        for(const a of as)out.file((/\.cia$/i.test(a.name)?'cias/':'3ds/')+a.name,await download(a));
+      }else{
+        const re=it.type==='luma'?/^Luma3DS.*\.zip$/i:/^GodMode9-.*\.zip$/i;
+        const a=rel.assets.find(a=>re.test(a.name));
+        if(!a)throw new Error('no .zip asset found (assets: '+rel.assets.map(x=>x.name).join(', ')+')');
+        const z=await JSZip.loadAsync(await download(a));
+        for(const [p,f] of Object.entries(z.files)){
+          if(f.dir)continue;
+          const data=await f.async('uint8array');
+          if(it.type==='luma')out.file(p,data);
+          else if(/(^|\/)GodMode9\.firm$/i.test(p))out.file('luma/payloads/GodMode9.firm',data);
+          else if(/^gm9\//i.test(p))out.file(p,data);
+        }
+      }
+      ver.push(`${it.name}: ${tag}`);status(it,'✓ '+tag,'ok');
+    }catch(e){
+      status(it,`✕ ${esc(e.message)}<br><a href="https://github.com/${it.repo}/releases/latest" target="_blank" rel="noopener">open on GitHub</a>`,'err');
+    }
+    $('bar').firstChild.style.width=(++n/chosen.length*100)+'%';
+  }
+  if(ver.length){
+    out.file('VERSIONS.txt',ver.join('\n')+'\n\nBuilt '+new Date().toISOString()+'\n');
+    try{
+      if(dirHandle){
+        for(const [p,f] of Object.entries(out.files))if(!f.dir)await writeTo(dirHandle,p,await f.async('uint8array'));
+        alert(`Done: ${ver.length} of ${chosen.length} items written to "${dirHandle.name}".`);
+      }else{
+        const a=document.createElement('a');
+        a.href=URL.createObjectURL(await out.generateAsync({type:'blob'}));a.download='3ds-sd-files.zip';a.click();
+      }
+    }catch(e){alert('Could not write the files: '+e.message+'\nTry again without choosing a folder to get a zip instead.')}
+  }
+  btn.disabled=false;
+};
+</script>
+</body>
+</html>
